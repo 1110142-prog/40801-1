@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>太空跑酷遊戲</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Noto Sans TC', sans-serif;
+            overflow: hidden; /* 防止滾動 */
+        }
+        canvas {
+            background-color: #0c0a1a; /* 深空藍背景 */
+            display: block;
+            border-radius: 0.5rem;
+            box-shadow: 0 0 25px rgba(0, 255, 255, 0.6); /* 青色光暈效果 */
+        }
+        .game-container {
+            width: 100%;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            transition: transform 0.1s ease-in-out; /* 為了螢幕震動效果 */
+        }
+        .text-cyan-glow {
+            text-shadow: 0 0 12px rgba(0, 255, 255, 0.8);
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white">
+
+    <div id="gameContainer" class="game-container p-4">
+        <h1 class="text-4xl font-bold mb-4 text-cyan-400 text-cyan-glow">太空跑酷</h1>
+        <div class="w-full max-w-4xl flex justify-between items-center mb-2 px-2">
+            <div class="text-2xl font-semibold">分數: <span id="score">0</span></div>
+            <div class="text-2xl font-semibold">最高分: <span id="highScore">0</span></div>
+        </div>
+        <canvas id="gameCanvas"></canvas>
+        <div id="messageOverlay" class="absolute inset-0 bg-black bg-opacity-50 flex justify-center items-center text-center">
+            <div id="messageBox" class="text-4xl font-bold text-cyan-glow">
+                <p>點擊螢幕或按空白鍵開始遊戲</p>
+                <p class="text-xl mt-4">目標：跳過隕石，活得越久越好！</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- 遊戲設定與變數 ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scoreEl = document.getElementById('score');
+        const highScoreEl = document.getElementById('highScore');
+        const messageOverlay = document.getElementById('messageOverlay');
+        const messageBox = document.getElementById('messageBox');
+        const gameContainer = document.getElementById('gameContainer');
+
+        let score = 0;
+        let highScore = localStorage.getItem('spaceParkourHighScore') || 0;
+        let gameSpeed = 8; // 終極難度：提高初始速度
+        let gameSpeedIncrease = 0.003; // 終極難度：提高加速度
+        let gravity = 0.7; // 太空重力稍低
+        let isGameActive = false;
+        let animationFrameId;
+
+        // 障礙物相關
+        let obstacles = [];
+        let obstacleSpawnTimer = 0;
+        let nextObstacleInterval = 120;
+
+        // 特效與背景相關
+        let particles = [];
+        let stars = [];
+
+        // --- 調整畫布大小 ---
+        function resizeCanvas() {
+            const container = document.getElementById('gameContainer');
+            const maxWidth = 1024;
+            const containerWidth = container.clientWidth - 32;
+            const containerHeight = container.clientHeight * 0.7;
+
+            const canvasWidth = Math.min(containerWidth, maxWidth);
+            const aspectRatio = 16 / 9;
+            canvas.width = canvasWidth;
+            canvas.height = canvasWidth / aspectRatio;
+
+            if (canvas.height > containerHeight) {
+                canvas.height = containerHeight;
+                canvas.width = containerHeight * aspectRatio;
+            }
+        }
+
+        // --- 粒子物件 ---
+        class Particle {
+            constructor(x, y, size, color, velocity) {
+                this.x = x;
+                this.y = y;
+                this.size = size;
+                this.color = color;
+                this.velocity = velocity;
+                this.alpha = 1;
+            }
+
+            draw() {
+                ctx.save();
+                ctx.globalAlpha = this.alpha;
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+
+            update() {
+                this.x += this.velocity.x;
+                this.y += this.velocity.y;
+                this.alpha -= 0.03;
+                if (this.size > 0.2) this.size -= 0.1;
+            }
+        }
+
+        // --- 玩家物件 (太空人) ---
+        class Player {
+            constructor(x, y, width, height) {
+                this.x = x;
+                this.y = y;
+                this.width = width;
+                this.height = height;
+                this.velocityY = 0;
+                this.isJumping = false;
+            }
+
+            draw() {
+                ctx.shadowBlur = 20;
+                ctx.shadowColor = '#00ffff'; // 青色光暈
+                ctx.fillStyle = '#e0e0ff'; // 太空衣亮白色
+                ctx.fillRect(this.x, this.y, this.width, this.height);
+                
+                ctx.shadowBlur = 0;
+                ctx.fillStyle = 'rgba(100, 180, 255, 0.8)'; // 護目鏡顏色
+                ctx.fillRect(this.x + this.width * 0.2, this.y + this.height * 0.2, this.width * 0.6, this.height * 0.3);
+            }
+
+            update() {
+                this.y += this.velocityY;
+
+                const groundY = canvas.height - this.height - 20;
+                if (this.y < groundY) {
+                    this.velocityY += gravity;
+                } else {
+                    this.velocityY = 0;
+                    this.y = groundY;
+                    this.isJumping = false;
+                }
+
+                if(isGameActive) {
+                    particles.push(new Particle(
+                        this.x + this.width / 2, 
+                        this.y + this.height, 
+                        Math.random() * 2 + 1, 
+                        '#ffcc00', // 推進器火焰
+                        { x: (Math.random() - 0.5) * 2, y: Math.random() * 2 + 1 }
+                    ));
+                }
+            }
+
+            jump() {
+                if (!this.isJumping) {
+                    this.velocityY = -17; // 跳躍高度
+                    this.isJumping = true;
+                }
+            }
+        }
+
+        // --- 障礙物物件 (隕石) ---
+        class Obstacle {
+            constructor(x, y, width, height, speed) {
+                this.x = x;
+                this.y = y;
+                this.width = width;
+                this.height = height;
+                this.speed = speed;
+            }
+
+            draw() {
+                ctx.shadowBlur = 15;
+                ctx.shadowColor = '#555'; // 隕石陰影
+                ctx.fillStyle = '#8B4513'; // 隕石棕色
+                ctx.fillRect(this.x, this.y, this.width, this.height);
+                
+                ctx.shadowBlur = 0;
+                ctx.fillStyle = 'rgba(160, 82, 45, 0.8)'; // 亮部
+                ctx.fillRect(this.x + 3, this.y + 3, this.width - 6, this.height - 6);
+            }
+
+            update() {
+                this.x -= this.speed;
+            }
+        }
+
+        let player;
+
+        // --- 初始化遊戲 ---
+        function init() {
+            resizeCanvas();
+            highScoreEl.textContent = highScore;
+            
+            const playerSize = canvas.width * 0.05;
+            player = new Player(50, canvas.height - playerSize - 20, playerSize, playerSize);
+            
+            obstacles = [];
+            particles = [];
+            score = 0;
+            gameSpeed = 8; // 重置時也要使用提高後的速度
+            scoreEl.textContent = score;
+
+            // 初始化星星
+            stars = [];
+            for (let i = 0; i < 100; i++) {
+                stars.push({
+                    x: Math.random() * canvas.width,
+                    y: Math.random() * canvas.height,
+                    size: Math.random() * 2 + 0.5,
+                    speedModifier: Math.random() * 0.5 + 0.1
+                });
+            }
+            
+            drawInitialState();
+        }
+        
+        function drawInitialState() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            drawBackground();
+            drawGround();
+            player.draw();
+        }
+
+        // --- 繪製背景與地面 ---
+        function drawBackground() {
+            ctx.save();
+            ctx.fillStyle = '#0c0a1a'; // 深空
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // 繪製星星
+            stars.forEach(star => {
+                star.x -= gameSpeed * star.speedModifier;
+                if (star.x < 0) {
+                    star.x = canvas.width;
+                    star.y = Math.random() * canvas.height;
+                }
+                ctx.fillStyle = `rgba(255, 255, 255, ${star.size / 2.5})`;
+                ctx.beginPath();
+                ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            ctx.restore();
+        }
+
+        function drawGround() {
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = '#4A5568'; // 太空站/星球表面顏色
+            ctx.fillRect(0, canvas.height - 20, canvas.width, 20);
+            ctx.strokeStyle = '#718096'; // 線條
+            ctx.lineWidth = 2;
+            for(let i = 0; i < canvas.width; i+= 50) {
+                ctx.beginPath();
+                ctx.moveTo(i, canvas.height - 20);
+                ctx.lineTo(i + 40, canvas.height);
+                ctx.stroke();
+            }
+        }
+
+        // --- 產生障礙物 (已增加更多難度) ---
+        function spawnObstacle() {
+            obstacleSpawnTimer++;
+            if (obstacleSpawnTimer > nextObstacleInterval) {
+                obstacleSpawnTimer = 0;
+                
+                const pattern = Math.random(); // 隨機選擇一個模式
+                const groundY = canvas.height - 20;
+
+                if (pattern < 0.35) { // 模式 1: 單一標準隕石 (35% 機率)
+                    const minHeight = 40;
+                    const maxHeight = 90;
+                    const height = Math.random() * (maxHeight - minHeight) + minHeight;
+                    const width = Math.random() * 15 + 25;
+                    obstacles.push(new Obstacle(canvas.width, groundY - height, width, height, gameSpeed));
+                    nextObstacleInterval = Math.random() * (110 - 60) + 60 / (gameSpeed / 8);
+                } else if (pattern < 0.60) { // 模式 2: 連續兩個矮隕石 (25% 機率)
+                    const height = 35;
+                    const width = 25;
+                    obstacles.push(new Obstacle(canvas.width, groundY - height, width, height, gameSpeed));
+                    obstacles.push(new Obstacle(canvas.width + width * 2.5, groundY - height, width, height, gameSpeed));
+                    nextObstacleInterval = Math.random() * (130 - 80) + 80 / (gameSpeed / 8);
+                } else if (pattern < 0.80) { // 模式 3: 高牆隕石 (20% 機率)
+                    const height = 110;
+                    const width = 40;
+                    obstacles.push(new Obstacle(canvas.width, groundY - height, width, height, gameSpeed));
+                    nextObstacleInterval = Math.random() * (140 - 90) + 90 / (gameSpeed / 8);
+                } else if (pattern < 0.95) { // 模式 4: 寬矮隕石 (15% 機率)
+                    const height = 45;
+                    const width = 90;
+                    obstacles.push(new Obstacle(canvas.width, groundY - height, width, height, gameSpeed));
+                    nextObstacleInterval = Math.random() * (120 - 70) + 70 / (gameSpeed / 8);
+                } else { // 模式 5: 階梯陷阱 (5% 機率)
+                    const height1 = 30;
+                    const width1 = 30;
+                    const height2 = 80;
+                    const width2 = 30;
+                    obstacles.push(new Obstacle(canvas.width, groundY - height1, width1, height1, gameSpeed));
+                    obstacles.push(new Obstacle(canvas.width + width1 + 40, groundY - height2, width2, height2, gameSpeed));
+                    nextObstacleInterval = Math.random() * (160 - 110) + 110 / (gameSpeed / 8);
+                }
+            }
+        }
+        
+        // --- 碰撞檢測 ---
+        function checkCollision() {
+            for (const obs of obstacles) {
+                if (
+                    player.x < obs.x + obs.width &&
+                    player.x + player.width > obs.x &&
+                    player.y < obs.y + obs.height &&
+                    player.y + player.height > obs.y
+                ) {
+                    gameOver();
+                }
+            }
+        }
+
+        // --- 螢幕震動 ---
+        function screenShake(duration, magnitude) {
+            let startTime = Date.now();
+            function shake() {
+                const elapsedTime = Date.now() - startTime;
+                if (elapsedTime < duration) {
+                    const x = (Math.random() - 0.5) * magnitude;
+                    const y = (Math.random() - 0.5) * magnitude;
+                    gameContainer.style.transform = `translate(${x}px, ${y}px)`;
+                    requestAnimationFrame(shake);
+                } else {
+                    gameContainer.style.transform = 'translate(0, 0)';
+                }
+            }
+            shake();
+        }
+
+        // --- 遊戲結束 ---
+        function gameOver() {
+            isGameActive = false;
+            cancelAnimationFrame(animationFrameId);
+            screenShake(200, 8);
+            
+            if (score > highScore) {
+                highScore = score;
+                localStorage.setItem('spaceParkourHighScore', highScore);
+                highScoreEl.textContent = highScore;
+            }
+            
+            messageBox.innerHTML = `<p>遊戲結束！</p><p class="text-2xl mt-2">你的分數: ${score}</p><p class="text-xl mt-4">再次點擊以重新開始</p>`;
+            messageOverlay.style.display = 'flex';
+        }
+
+        // --- 遊戲主循環 ---
+        function animate() {
+            if (!isGameActive) return;
+
+            animationFrameId = requestAnimationFrame(animate);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            drawBackground();
+            drawGround();
+
+            particles.forEach((p, index) => {
+                p.update();
+                p.draw();
+                if (p.alpha <= 0) {
+                    particles.splice(index, 1);
+                }
+            });
+
+            player.update();
+            player.draw();
+
+            spawnObstacle();
+            obstacles.forEach((obs, index) => {
+                obs.speed = gameSpeed;
+                obs.update();
+                obs.draw();
+                if (obs.x + obs.width < 0) {
+                    obstacles.splice(index, 1);
+                }
+            });
+
+            checkCollision();
+            
+            score++;
+            scoreEl.textContent = score;
+            gameSpeed += gameSpeedIncrease;
+        }
+        
+        // --- 開始遊戲 ---
+        function startGame() {
+            if (isGameActive) return;
+            init();
+            isGameActive = true;
+            messageOverlay.style.display = 'none';
+            animate();
+        }
+
+        // --- 事件監聽 ---
+        window.addEventListener('resize', init);
+
+        document.body.addEventListener('keydown', (e) => {
+            if (e.code === 'Space') {
+                e.preventDefault();
+                if (!isGameActive) startGame();
+                else player.jump();
+            }
+        });
+        
+        window.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (!isGameActive) startGame();
+            else player.jump();
+        });
+
+        window.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            if (!isGameActive) startGame();
+            else player.jump();
+        });
+
+        // --- 初始載入 ---
+        init();
+    </script>
+
+</body>
+</html>
+
